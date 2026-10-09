@@ -1,0 +1,41 @@
+bundle:
+  name: daily_spend_guardrail
+
+include:
+  - resources/*.yml
+
+variables:
+  deployment_label:
+    description: Short label included in deployed resource names.
+    default: Workspace
+  warehouse_id:
+    description: ID of the SQL warehouse used to evaluate the alert.
+  daily_budget_usd:
+    description: Daily list-cost threshold in USD.
+    default: 1000
+  top_n:
+    description: Number of highest-cost workspace and SKU contributors to return.
+    default: 5
+  alert_cron:
+    description: Quartz cron expression for the daily alert evaluation.
+    default: "0 0 9 * * ?"
+  alert_timezone:
+    description: Java timezone used by the alert schedule.
+    default: America/Denver
+  alert_pause_status:
+    description: Alert schedule state. Use PAUSED until acceptance testing is complete.
+    default: UNPAUSED
+  alert_recipient_email:
+    description: Workspace user email that receives threshold notifications.
+  alert_access_group:
+    description: Existing workspace group granted CAN_RUN on the alert.
+
+targets:
+  dev:
+    default: true
+    mode: development
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

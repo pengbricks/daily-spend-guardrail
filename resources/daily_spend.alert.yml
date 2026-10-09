@@ -1,0 +1,82 @@
+resources:
+  alerts:
+    daily_spend_guardrail:
+      display_name: "${var.deployment_label} Daily Spend Guardrail"
+      warehouse_id: ${var.warehouse_id}
+      query_text: |-
+        WITH priced_usage AS (
+          SELECT
+            usage.usage_date,
+            COALESCE(CAST(usage.workspace_id AS STRING), 'account-level') AS workspace_id,
+            usage.sku_name,
+            CAST(usage.usage_quantity * prices.pricing.default AS DECIMAL(38, 6)) AS list_cost_usd
+          FROM system.billing.usage AS usage
+          INNER JOIN system.billing.list_prices AS prices
+            ON usage.cloud = prices.cloud
+            AND usage.sku_name = prices.sku_name
+            AND usage.usage_start_time >= prices.price_start_time
+            AND (
+              usage.usage_end_time <= prices.price_end_time
+              OR prices.price_end_time IS NULL
+            )
+          WHERE usage.usage_date = date_sub(current_date(), 1)
+            AND prices.currency_code = 'USD'
+        ),
+        contributors AS (
+          SELECT
+            usage_date,
+            workspace_id,
+            sku_name,
+            SUM(list_cost_usd) AS contributor_spend_usd
+          FROM priced_usage
+          GROUP BY usage_date, workspace_id, sku_name
+        ),
+        ranked_contributors AS (
+          SELECT
+            usage_date,
+            workspace_id,
+            sku_name,
+            contributor_spend_usd,
+            SUM(contributor_spend_usd) OVER (PARTITION BY usage_date) AS daily_spend_usd,
+            ROW_NUMBER() OVER (
+              PARTITION BY usage_date
+              ORDER BY contributor_spend_usd DESC, workspace_id, sku_name
+            ) AS spend_rank
+          FROM contributors
+        )
+        SELECT
+          usage_date,
+          ROUND(daily_spend_usd, 2) AS daily_spend_usd,
+          spend_rank,
+          workspace_id,
+          sku_name,
+          ROUND(contributor_spend_usd, 2) AS contributor_spend_usd,
+          ROUND(100 * try_divide(contributor_spend_usd, daily_spend_usd), 2) AS percent_of_daily_spend
+        FROM ranked_contributors
+        WHERE spend_rank <= ${var.top_n}
+        ORDER BY spend_rank
+
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: daily_spend_usd
+          display: Daily spend (USD)
+          aggregation: MAX
+        threshold:
+          value:
+            double_value: ${var.daily_budget_usd}
+        empty_result_state: OK
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 1
+          subscriptions:
+            - user_email: ${var.alert_recipient_email}
+
+      schedule:
+        pause_status: ${var.alert_pause_status}
+        quartz_cron_schedule: ${var.alert_cron}
+        timezone_id: ${var.alert_timezone}
+
+      permissions:
+        - level: CAN_RUN
+          group_name: ${var.alert_access_group}

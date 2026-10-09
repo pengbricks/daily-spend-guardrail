@@ -1,0 +1,555 @@
+{
+  "datasets": [
+    {
+      "name": "ds_spend_summary",
+      "displayName": "Spend summary",
+      "queryLines": [
+        "WITH priced_usage AS (\n",
+        "  SELECT usage.usage_date, usage.usage_quantity * prices.pricing.default AS list_cost_usd\n",
+        "  FROM usage AS usage\n",
+        "  INNER JOIN list_prices AS prices\n",
+        "    ON usage.cloud = prices.cloud\n",
+        "    AND usage.sku_name = prices.sku_name\n",
+        "    AND usage.usage_start_time >= prices.price_start_time\n",
+        "    AND (usage.usage_end_time <= prices.price_end_time OR prices.price_end_time IS NULL)\n",
+        "  WHERE usage.usage_date BETWEEN date_sub(current_date(), 31) AND date_sub(current_date(), 1)\n",
+        "    AND prices.currency_code = 'USD'\n",
+        "    AND (:account_filter IS NULL OR CAST(usage.account_id AS STRING) = :account_filter)\n",
+        "    AND (:workspace_filter IS NULL OR CAST(usage.workspace_id AS STRING) = :workspace_filter)\n",
+        "),\n",
+        "daily_spend AS (\n",
+        "  SELECT usage_date, SUM(list_cost_usd) AS daily_spend_usd\n",
+        "  FROM priced_usage\n",
+        "  GROUP BY usage_date\n",
+        ")\n",
+        "SELECT\n",
+        "  ROUND(MAX(CASE WHEN usage_date = date_sub(current_date(), 1) THEN daily_spend_usd END), 2) AS yesterday_spend_usd,\n",
+        "  ROUND(MAX(CASE WHEN usage_date = date_sub(current_date(), 2) THEN daily_spend_usd END), 2) AS prior_day_spend_usd,\n",
+        "  ROUND(AVG(CASE WHEN usage_date BETWEEN date_sub(current_date(), 7) AND date_sub(current_date(), 1) THEN daily_spend_usd END), 2) AS seven_day_avg_spend_usd,\n",
+        "  ROUND(SUM(CASE WHEN usage_date BETWEEN date_sub(current_date(), 30) AND date_sub(current_date(), 1) THEN daily_spend_usd ELSE 0 END), 2) AS thirty_day_spend_usd\n",
+        "FROM daily_spend\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "account_filter",
+          "displayName": "Account",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        },
+        {
+          "keyword": "workspace_filter",
+          "displayName": "Workspace ID",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        }
+      ]
+    },
+    {
+      "name": "ds_daily_spend",
+      "displayName": "Daily spend trend",
+      "queryLines": [
+        "SELECT\n",
+        "  usage.usage_date,\n",
+        "  ROUND(SUM(usage.usage_quantity * prices.pricing.default), 2) AS daily_spend_usd\n",
+        "FROM usage AS usage\n",
+        "INNER JOIN list_prices AS prices\n",
+        "  ON usage.cloud = prices.cloud\n",
+        "  AND usage.sku_name = prices.sku_name\n",
+        "  AND usage.usage_start_time >= prices.price_start_time\n",
+        "  AND (usage.usage_end_time <= prices.price_end_time OR prices.price_end_time IS NULL)\n",
+        "WHERE usage.usage_date BETWEEN date_sub(current_date(), 90) AND date_sub(current_date(), 1)\n",
+        "  AND prices.currency_code = 'USD'\n",
+        "  AND (:account_filter IS NULL OR CAST(usage.account_id AS STRING) = :account_filter)\n",
+        "  AND (:workspace_filter IS NULL OR CAST(usage.workspace_id AS STRING) = :workspace_filter)\n",
+        "GROUP BY usage.usage_date\n",
+        "ORDER BY usage.usage_date\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "account_filter",
+          "displayName": "Account",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        },
+        {
+          "keyword": "workspace_filter",
+          "displayName": "Workspace ID",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        }
+      ]
+    },
+    {
+      "name": "ds_top_contributors",
+      "displayName": "Top contributors",
+      "queryLines": [
+        "WITH priced_usage AS (\n",
+        "  SELECT\n",
+        "    usage.usage_date,\n",
+        "    CAST(usage.account_id AS STRING) AS account_id,\n",
+        "    COALESCE(CAST(usage.workspace_id AS STRING), 'account-level') AS workspace_id,\n",
+        "    usage.sku_name,\n",
+        "    usage.usage_quantity * prices.pricing.default AS list_cost_usd\n",
+        "  FROM usage AS usage\n",
+        "  INNER JOIN list_prices AS prices\n",
+        "    ON usage.cloud = prices.cloud\n",
+        "    AND usage.sku_name = prices.sku_name\n",
+        "    AND usage.usage_start_time >= prices.price_start_time\n",
+        "    AND (usage.usage_end_time <= prices.price_end_time OR prices.price_end_time IS NULL)\n",
+        "  WHERE usage.usage_date = date_sub(current_date(), 1)\n",
+        "    AND prices.currency_code = 'USD'\n",
+        "    AND (:account_filter IS NULL OR CAST(usage.account_id AS STRING) = :account_filter)\n",
+        "    AND (:workspace_filter IS NULL OR CAST(usage.workspace_id AS STRING) = :workspace_filter)\n",
+        "),\n",
+        "contributors AS (\n",
+        "  SELECT usage_date, account_id, workspace_id, sku_name, SUM(list_cost_usd) AS contributor_spend_usd\n",
+        "  FROM priced_usage\n",
+        "  GROUP BY usage_date, account_id, workspace_id, sku_name\n",
+        ")\n",
+        "SELECT\n",
+        "  usage_date,\n",
+        "  ROW_NUMBER() OVER (ORDER BY contributor_spend_usd DESC, account_id, workspace_id, sku_name) AS spend_rank,\n",
+        "  account_id,\n",
+        "  workspace_id,\n",
+        "  sku_name,\n",
+        "  CONCAT(workspace_id, ' · ', sku_name) AS contributor_label,\n",
+        "  ROUND(contributor_spend_usd, 2) AS contributor_spend_usd,\n",
+        "  ROUND(100 * try_divide(contributor_spend_usd, SUM(contributor_spend_usd) OVER ()), 2) AS percent_of_daily_spend\n",
+        "FROM contributors\n",
+        "QUALIFY spend_rank <= 5\n",
+        "ORDER BY spend_rank\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "account_filter",
+          "displayName": "Account",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        },
+        {
+          "keyword": "workspace_filter",
+          "displayName": "Workspace ID",
+          "dataType": "STRING",
+          "defaultSelection": {}
+        }
+      ]
+    },
+    {
+      "name": "ds_accounts",
+      "displayName": "Billing accounts",
+      "queryLines": [
+        "SELECT DISTINCT CAST(account_id AS STRING) AS account_id\n",
+        "FROM usage\n",
+        "WHERE usage_date BETWEEN date_sub(current_date(), 90) AND date_sub(current_date(), 1)\n",
+        "  AND account_id IS NOT NULL\n",
+        "ORDER BY account_id\n"
+      ]
+    },
+    {
+      "name": "ds_workspaces",
+      "displayName": "Workspaces",
+      "queryLines": [
+        "SELECT DISTINCT CAST(workspace_id AS STRING) AS workspace_id\n",
+        "FROM usage\n",
+        "WHERE usage_date BETWEEN date_sub(current_date(), 90) AND date_sub(current_date(), 1)\n",
+        "  AND workspace_id IS NOT NULL\n",
+        "ORDER BY workspace_id\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Spend Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "dashboard-title",
+            "multilineTextboxSpec": {
+              "lines": ["# Daily Spend Guardrail"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "dashboard-subtitle",
+            "multilineTextboxSpec": {
+              "lines": ["Monitor estimated USD list cost by usage date. Values exclude contract discounts, credits, and taxes; the dashboard never stops compute."]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "account-filter",
+            "queries": [
+              {
+                "name": "account_values",
+                "query": {
+                  "datasetName": "ds_accounts",
+                  "fields": [
+                    {"name": "account_id", "expression": "`account_id`"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "summary_account",
+                "query": {
+                  "datasetName": "ds_spend_summary",
+                  "parameters": [
+                    {"name": "account_filter", "keyword": "account_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "daily_account",
+                "query": {
+                  "datasetName": "ds_daily_spend",
+                  "parameters": [
+                    {"name": "account_filter", "keyword": "account_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "contributors_account",
+                "query": {
+                  "datasetName": "ds_top_contributors",
+                  "parameters": [
+                    {"name": "account_filter", "keyword": "account_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "account_id", "displayName": "Account", "queryName": "account_values"},
+                  {"parameterName": "account_filter", "queryName": "summary_account"},
+                  {"parameterName": "account_filter", "queryName": "daily_account"},
+                  {"parameterName": "account_filter", "queryName": "contributors_account"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Billing Account"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "workspace-filter",
+            "queries": [
+              {
+                "name": "workspace_values",
+                "query": {
+                  "datasetName": "ds_workspaces",
+                  "fields": [
+                    {"name": "workspace_id", "expression": "`workspace_id`"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "summary_workspace",
+                "query": {
+                  "datasetName": "ds_spend_summary",
+                  "parameters": [
+                    {"name": "workspace_filter", "keyword": "workspace_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "daily_workspace",
+                "query": {
+                  "datasetName": "ds_daily_spend",
+                  "parameters": [
+                    {"name": "workspace_filter", "keyword": "workspace_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "contributors_workspace",
+                "query": {
+                  "datasetName": "ds_top_contributors",
+                  "parameters": [
+                    {"name": "workspace_filter", "keyword": "workspace_filter"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "workspace_id", "displayName": "Workspace ID", "queryName": "workspace_values"},
+                  {"parameterName": "workspace_filter", "queryName": "summary_workspace"},
+                  {"parameterName": "workspace_filter", "queryName": "daily_workspace"},
+                  {"parameterName": "workspace_filter", "queryName": "contributors_workspace"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Workspace ID"}
+            }
+          },
+          "position": {"x": 4, "y": 2, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "usage-date-filter",
+            "queries": [
+              {
+                "name": "daily_spend_date",
+                "query": {
+                  "datasetName": "ds_daily_spend",
+                  "fields": [
+                    {"name": "usage_date", "expression": "`usage_date`"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "usage_date", "displayName": "Usage date", "queryName": "daily_spend_date"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Trend Date Range"}
+            }
+          },
+          "position": {"x": 8, "y": 2, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "yesterday-spend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_spend_summary",
+                  "fields": [
+                    {"name": "yesterday_spend_usd", "expression": "`yesterday_spend_usd`"},
+                    {"name": "prior_day_spend_usd", "expression": "`prior_day_spend_usd`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "yesterday_spend_usd",
+                  "displayName": "Yesterday",
+                  "format": {"type": "number-currency", "currencyCode": "USD", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 2}}
+                },
+                "target": {"fieldName": "prior_day_spend_usd", "displayName": "vs prior day"}
+              },
+              "frame": {"showTitle": true, "title": "Yesterday's List Cost"}
+            }
+          },
+          "position": {"x": 0, "y": 4, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "seven-day-average",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_spend_summary",
+                  "fields": [
+                    {"name": "seven_day_avg_spend_usd", "expression": "`seven_day_avg_spend_usd`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "seven_day_avg_spend_usd",
+                  "displayName": "Daily average",
+                  "format": {"type": "number-currency", "currencyCode": "USD", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 2}}
+                }
+              },
+              "frame": {"showTitle": true, "title": "7-Day Daily Average"}
+            }
+          },
+          "position": {"x": 4, "y": 4, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "thirty-day-spend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_spend_summary",
+                  "fields": [
+                    {"name": "thirty_day_spend_usd", "expression": "`thirty_day_spend_usd`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "thirty_day_spend_usd",
+                  "displayName": "30-day total",
+                  "format": {"type": "number-currency", "currencyCode": "USD", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 2}}
+                }
+              },
+              "frame": {"showTitle": true, "title": "30-Day List Cost"}
+            }
+          },
+          "position": {"x": 8, "y": 4, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "daily-spend-trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_daily_spend",
+                  "fields": [
+                    {"name": "usage_date", "expression": "`usage_date`"},
+                    {"name": "daily_spend_usd", "expression": "`daily_spend_usd`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "usage_date", "displayName": "Usage date", "scale": {"type": "temporal"}},
+                "y": {
+                  "fieldName": "daily_spend_usd",
+                  "displayName": "Daily list cost",
+                  "scale": {"type": "quantitative", "domainMin": 0},
+                  "format": {"type": "number-currency", "currencyCode": "USD", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 2}}
+                }
+              },
+              "frame": {"showTitle": true, "title": "Daily List Cost Trend"}
+            }
+          },
+          "position": {"x": 0, "y": 7, "width": 8, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "top-contributors-bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_top_contributors",
+                  "fields": [
+                    {"name": "contributor_label", "expression": "`contributor_label`"},
+                    {"name": "contributor_spend_usd", "expression": "`contributor_spend_usd`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "scale": {"type": "quantitative", "domainMin": 0},
+                  "fields": [
+                    {
+                      "fieldName": "contributor_spend_usd",
+                      "displayName": "List cost",
+                      "format": {"type": "number-currency", "currencyCode": "USD", "abbreviation": "compact", "decimalPlaces": {"type": "max", "places": 2}}
+                    }
+                  ]
+                },
+                "y": {"fieldName": "contributor_label", "displayName": "Workspace · SKU", "scale": {"type": "categorical"}}
+              },
+              "frame": {"showTitle": true, "title": "Yesterday's Top 5 Contributors"}
+            }
+          },
+          "position": {"x": 8, "y": 7, "width": 4, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "top-contributors-table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_top_contributors",
+                  "fields": [
+                    {"name": "spend_rank", "expression": "`spend_rank`"},
+                    {"name": "account_id", "expression": "`account_id`"},
+                    {"name": "workspace_id", "expression": "`workspace_id`"},
+                    {"name": "sku_name", "expression": "`sku_name`"},
+                    {"name": "contributor_spend_usd", "expression": "`contributor_spend_usd`"},
+                    {"name": "percent_of_daily_spend", "expression": "`percent_of_daily_spend`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "spend_rank", "displayName": "Rank"},
+                  {"fieldName": "account_id", "displayName": "Account ID"},
+                  {"fieldName": "workspace_id", "displayName": "Workspace ID"},
+                  {"fieldName": "sku_name", "displayName": "SKU"},
+                  {
+                    "fieldName": "contributor_spend_usd",
+                    "displayName": "List Cost",
+                    "format": {"type": "number-currency", "currencyCode": "USD", "decimalPlaces": {"type": "exact", "places": 2}}
+                  },
+                  {"fieldName": "percent_of_daily_spend", "displayName": "% of Day", "formatTemplate": "{{@formatted}}%"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Top Contributor Detail"}
+            }
+          },
+          "position": {"x": 0, "y": 13, "width": 12, "height": 6}
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {"light": "#F6F8FB", "dark": "#182027"},
+      "widgetBackgroundColor": {"light": "#FFFFFF", "dark": "#10171D"},
+      "widgetBorderColor": {"light": "#FFFFFF", "dark": "#10171D"},
+      "fontColor": {"light": "#152536", "dark": "#E8ECF0"},
+      "selectionColor": {"light": "#2272B4", "dark": "#8ACAFF"},
+      "visualizationColors": ["#094074", "#3C6997", "#5ADBFF", "#FFDD4A", "#FE9000", "#FF7054"],
+      "widgetHeaderAlignment": "LEFT",
+      "fontFamily": "Inter",
+      "widgetCornerRadius": 10
+    }
+  }
+}

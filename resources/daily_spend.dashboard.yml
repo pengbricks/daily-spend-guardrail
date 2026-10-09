@@ -1,0 +1,8 @@
+resources:
+  dashboards:
+    daily_spend_dashboard:
+      display_name: "${var.deployment_label} Daily Spend Guardrail"
+      file_path: ../src/dashboards/daily_spend.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+      dataset_catalog: system
+      dataset_schema: billing
